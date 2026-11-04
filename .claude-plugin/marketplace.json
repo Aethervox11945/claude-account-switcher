@@ -1,0 +1,6 @@
+{
+  "name": "claude-account-switcher",
+  "owner": { "name": "Kajcsi" },
+  "description": "A Claude Code mod that switches between saved Claude accounts, for the desktop app and the CLI",
+  "plugins": [{ "name": "account-switcher", "source": "./" }]
+}
