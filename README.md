@@ -1,5 +1,7 @@
 # account-switcher
 
+> This is an improved version of [claude-account-switcher](https://github.com/Kajcsi/claude-account-switcher) by [Kajcsi](https://github.com/Kajcsi), who created the mod and the account switching behind it. It adds a Windows app and Code chat carry-over. See [Credits](#credits). The install commands below are for the original mod; the Windows app is built from this repo, as described under [Windows app](#windows-app).
+
 A Claude Code mod that keeps several Claude accounts signed in on one computer and switches between them in one click, for both the **Claude desktop app** and the **Claude Code CLI**.
 
 - **CLI:** switches in place. A running `claude` picks up the new login without a restart.
@@ -35,6 +37,33 @@ In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt 
 
 The status line shows which account the session is on.
 
+## Windows app
+
+`ClaudeAccountSwitcher.exe` does the same job in a window of its own, with no Claude Code session needed. It's one portable file: run it from anywhere, nothing else to install. It shares its saved accounts with the mod.
+
+- **Switch** moves the app and the CLI to that account. The **⋯** menu can move just one of them, rename an account, or remove it.
+- **Add account** restarts the app signed out, or opens `claude auth login` for the CLI. The current login is saved first.
+- **More > Install to this computer** is optional. It adds a Start menu entry and an Installed apps entry, without admin rights. Uninstalling keeps your saved accounts.
+
+Build it with the .NET 10 SDK. This runs the smoke tests, then writes `dist\ClaudeAccountSwitcher.exe`:
+
+```
+powershell -ExecutionPolicy Bypass -File gui\build.ps1
+```
+
+### Chats and history
+
+- **CLI:** nothing to do. Transcripts live in `~/.claude/projects`, which no account owns, so every account sees them.
+- **Claude app Code tab:** the app lists chats per account, in `claude-code-sessions\<account>\<org>\`. The Windows app brings them along: during a switch, while Claude is closed, it copies each `local_*.json` record into the target account. A record only points at its transcript, so the conversation itself doesn't move. The newest copy of a record wins, and any record it replaces is kept in `chat-backups/`. Turn this off under **More > Bring Code chats along when switching**. The `/accounts` mod doesn't do this.
+
+Limits of bringing chats along:
+
+- A copied chat continues on the account you're signed in to, and later messages go to that account. Keep this off if work and personal chats must stay apart.
+- Connectors and Remote Control links saved in a chat belong to the account that started it, so they may not work from another account.
+- A chat deleted under one account comes back on the next switch if another account still has a copy.
+- A newly added account gets the chats on the first switch into it after you've signed in.
+- Cowork sessions and chats on claude.ai aren't copied. claude.ai chats are stored on the server per account.
+
 ## How it works
 
 | | Where the login lives | What a switch does |
@@ -52,3 +81,14 @@ Saved logins are kept in `~/.claude/account-switcher/` (or `$CLAUDE_CONFIG_DIR/a
 - On macOS the CLI keeps its login in the Keychain, which this mod doesn't switch yet.
 - Signing out in the app or running `/logout` can revoke that account's tokens on the server. To add an account, use `/accounts add` instead of signing out.
 - The desktop app's storage layout isn't a public interface, so an app update could change it. If a switch doesn't take, `swap.log` says why, and the previous sign-in is in `backups/`.
+
+## Credits
+
+The original [claude-account-switcher](https://github.com/Kajcsi/claude-account-switcher) is by [Kajcsi](https://github.com/Kajcsi) and is released under the MIT License. The mod, the way logins are saved and swapped, and `scripts/desktop-swap.ps1` all come from that project.
+
+Added in this version:
+
+- The Windows app in `gui/`: a portable exe with an optional install
+- Bringing Code chats along on an app switch (the `-SyncChats` option of `scripts/desktop-swap.ps1`)
+
+This version keeps the original MIT License and copyright notice in [LICENSE](LICENSE).

@@ -17,6 +17,8 @@ param(
   [string] $To = '',
   [int] $DelayMs = 1500,
   [switch] $NoRelaunch,
+  # Also copies Code tab chats into the target account (see Sync-Chats).
+  [switch] $SyncChats,
   # Which running executables count as the app (a test points it elsewhere).
   [string[]] $AppPathLike = @('*\WindowsApps\Claude_*\app\Claude.exe', '*\AnthropicClaude\app-*\claude.exe')
 )
@@ -173,6 +175,50 @@ function Save-Current($Config) {
   $id
 }
 
+# The app lists Code tab chats per account, from one small record each under
+# claude-code-sessions\<account>\<org>. A record points at its transcript in
+# the CLI's projects folder, which no account owns, so copying the record is
+# all it takes for a chat to show up under another account. Copies only: the
+# newest copy of a record wins, and one it replaces is backed up first.
+function Sync-Chats([string] $Id) {
+  $root = Join-Path $DataDir 'claude-code-sessions'
+  $account = Join-Path $root $Id
+  if (-not (Test-Path -LiteralPath $account)) {
+    Write-Log 'chats: the target account has no folder yet; it gets them on a later switch'
+    return 0
+  }
+  $targets = @(Get-ChildItem -LiteralPath $account -Directory)
+  $newest = @{}
+  foreach ($from in Get-ChildItem -LiteralPath $root -Directory | Where-Object { $_.Name -ne $Id }) {
+    foreach ($record in Get-ChildItem -LiteralPath $from.FullName -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter 'local_*.json' -File }) {
+      $known = $newest[$record.Name]
+      if ($null -eq $known -or $record.LastWriteTimeUtc -gt $known.LastWriteTimeUtc) { $newest[$record.Name] = $record }
+    }
+  }
+  $backups = Join-Path $StoreDir 'chat-backups'
+  $backup = Join-Path $backups (Get-Date -Format 'yyyyMMdd-HHmmss')
+  $copied = 0
+  foreach ($target in $targets) {
+    foreach ($record in $newest.Values) {
+      $path = Join-Path $target.FullName $record.Name
+      $exists = Test-Path -LiteralPath $path
+      if ($exists -and (Get-Item -LiteralPath $path).LastWriteTimeUtc -ge $record.LastWriteTimeUtc) { continue }
+      if ($exists) {
+        New-Item -ItemType Directory -Force -Path $backup | Out-Null
+        Copy-Item -LiteralPath $path -Destination (Join-Path $backup $record.Name) -Force
+      }
+      Copy-Item -LiteralPath $record.FullName -Destination $path -Force
+      $copied++
+    }
+  }
+  if (Test-Path -LiteralPath $backups) {
+    Get-ChildItem -LiteralPath $backups -Directory | Sort-Object Name -Descending |
+      Select-Object -Skip 5 | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Write-Log "chats: copied $copied into $Id"
+  $copied
+}
+
 function Write-Result([bool] $Ok, $From, $Problem) {
   Write-JsonFile (Join-Path $StoreDir 'last-swap.json') ([ordered]@{
       ok    = $Ok
@@ -181,11 +227,13 @@ function Write-Result([bool] $Ok, $From, $Problem) {
       to    = $To
       at    = Get-Now
       error = $Problem
+      chats = $ChatsCopied
     })
 }
 
 $exe = $null
 $from = $null
+$ChatsCopied = 0
 try {
   Write-Log "start: mode=$Mode to=$To"
   if ($Mode -eq 'switch') {
@@ -222,6 +270,10 @@ try {
     Write-Log "rolling back: $_"
     Restore-Backup $backup
     throw
+  }
+  # The sign-in is already in place: a problem here must not undo the switch.
+  if ($SyncChats -and $Mode -eq 'switch') {
+    try { $ChatsCopied = Sync-Chats $To } catch { Write-Log "chats: not copied: $_" }
   }
   Write-Log "done: from=$from to=$To"
   Write-Result $true $from $null
