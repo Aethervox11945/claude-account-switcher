@@ -10,7 +10,7 @@
     <AssemblyName>ClaudeAccountSwitcher</AssemblyName>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Product>Claude Account Switcher</Product>
     <Description>Switch between saved Claude accounts</Description>
     <!-- ThemeMode (the Windows 11 look, following light/dark) is marked experimental. -->

@@ -1,6 +1,6 @@
 {
   "name": "account-switcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Save several Claude accounts and switch between them in one click, for the desktop app and the CLI",
   "author": { "name": "Kajcsi" },
   "license": "MIT",
