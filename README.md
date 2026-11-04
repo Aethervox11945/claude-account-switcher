@@ -1,6 +1,6 @@
 # account-switcher
 
-> This is an improved version of [claude-account-switcher](https://github.com/Kajcsi/claude-account-switcher) by [Kajcsi](https://github.com/Kajcsi), who created the mod and the account switching behind it. It adds a Windows app and Code chat carry-over. See [Credits](#credits). The install commands below are for the original mod; the Windows app is built from this repo, as described under [Windows app](#windows-app).
+> This is an improved version of [claude-account-switcher](https://github.com/Kajcsi/claude-account-switcher) by [Kajcsi](https://github.com/Kajcsi), who created the mod and the account switching behind it. It adds a Windows app and Code chat carry-over. See [Credits](#credits). The install commands below are for the original mod. **[Download the Windows app](https://github.com/Aethervox11945/claude-account-switcher/releases)** from Releases.
 
 A Claude Code mod that keeps several Claude accounts signed in on one computer and switches between them in one click, for both the **Claude desktop app** and the **Claude Code CLI**.
 
@@ -45,7 +45,9 @@ The status line shows which account the session is on.
 - **Add account** restarts the app signed out, or opens `claude auth login` for the CLI. The current login is saved first.
 - **More > Install to this computer** is optional. It adds a Start menu entry and an Installed apps entry, without admin rights. Uninstalling keeps your saved accounts.
 
-Build it with the .NET 10 SDK. This runs the smoke tests, then writes `dist\ClaudeAccountSwitcher.exe`:
+[Download `ClaudeAccountSwitcher.exe` from Releases](https://github.com/Aethervox11945/claude-account-switcher/releases). It isn't code signed, so Windows SmartScreen may warn you on first run: choose **More info > Run anyway**.
+
+To build it yourself, use the .NET 10 SDK. This runs the smoke tests, then writes `dist\ClaudeAccountSwitcher.exe`:
 
 ```
 powershell -ExecutionPolicy Bypass -File gui\build.ps1
