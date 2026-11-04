@@ -1,7 +1,11 @@
-// One saved (or currently signed-in) account, as the pane lists it.
+// One saved (or currently signed-in) login, as the pane lists it.
 export type AccountRow = {
-  uuid: string
-  email: string
+  // The account's id, or `<account id>.<organization id>` for a CLI login to
+  // a second organization of the same account, or `unidentified-<time>`.
+  id: string
+  // What the row is called: a name given in the Windows app, else the email.
+  name: string
+  email?: string
   orgName?: string
   // A login the switcher can restore, or the one signed in right now.
   hasCli: boolean
@@ -16,8 +20,10 @@ export type SwitcherView = {
   host: 'desktop' | 'terminal'
   canSwitchDesktop: boolean
   canSwitchCli: boolean
-  desktopEmail?: string
-  cliEmail?: string
+  desktopName?: string
+  cliName?: string
+  // The CLI holds a login, even where its account can't be told.
+  isCliSignedIn: boolean
 }
 
 declare module 'claude-code' {

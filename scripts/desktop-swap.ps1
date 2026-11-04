@@ -8,7 +8,8 @@
 #
 # The account switcher mod launches it outside the app's process tree, so it
 # outlives the app it closes. Everything it changes is backed up first and put
-# back if any step fails.
+# back if any step fails. One switch runs at a time: a second one started while
+# the first holds swap.lock does nothing and exits with code 3.
 
 param(
   [Parameter(Mandatory = $true)] [string] $DataDir,
@@ -53,6 +54,8 @@ function Test-AccountId([string] $Id) {
   $Id -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 }
 
+function Get-Stamp { Get-Date -Format 'yyyyMMdd-HHmmss-fff' }
+
 function Get-AppProcesses {
   @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
       $path = $_.Path
@@ -69,12 +72,17 @@ function Wait-AppGone([int] $Seconds) {
   (Get-AppProcesses).Count -eq 0
 }
 
-# Closes the app, by its windows first, and answers the executable it ran
-# from, or $null where it was not running.
-function Stop-App {
+# The executable the app runs from, or $null where it is not running.
+function Get-AppExe {
   $running = Get-AppProcesses
   if ($running.Count -eq 0) { return $null }
-  $exe = $running[0].Path
+  $running[0].Path
+}
+
+# Closes the app, by its windows first.
+function Stop-App {
+  $running = Get-AppProcesses
+  if ($running.Count -eq 0) { return }
   foreach ($process in $running) {
     if ($process.MainWindowHandle -ne [IntPtr]::Zero) { [void] $process.CloseMainWindow() }
   }
@@ -83,14 +91,17 @@ function Stop-App {
     Get-AppProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
     if (-not (Wait-AppGone 15)) { throw 'Claude did not exit' }
   }
-  $exe
 }
 
 function Start-App([string] $Exe) {
   if ($Exe -like '*\WindowsApps\*') {
-    $package = Get-AppxPackage -Name 'Claude' |
+    $packages = @(Get-AppxPackage -Name 'Claude')
+    $package = $packages |
       Where-Object { $Exe.StartsWith($_.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } |
       Select-Object -First 1
+    # An update may have replaced the version it ran from while it was closed.
+    if ($null -eq $package) { $package = $packages | Sort-Object { [version] $_.Version } -Descending | Select-Object -First 1 }
+    if ($null -eq $package) { throw 'the Claude app package is no longer installed' }
     $app = (Get-AppxPackageManifest $package).Package.Applications.Application |
       Where-Object { $_.Executable -like '*Claude.exe' } |
       Select-Object -First 1
@@ -140,7 +151,7 @@ function Set-AuthKeys($Config, $Auth) {
 
 function Save-Backup {
   $root = Join-Path $StoreDir 'backups'
-  $dir = Join-Path $root (Get-Date -Format 'yyyyMMdd-HHmmss')
+  $dir = Join-Path $root (Get-Stamp)
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $dir 'config.json')
   Copy-Cookies $NetworkDir $dir
@@ -155,13 +166,17 @@ function Restore-Backup([string] $Dir) {
 }
 
 # Saves the signed-in account's keys and cookies under its id; answers the id,
-# or $null where the app holds no sign-in.
+# or $null where the app holds no sign-in. A sign-in whose account can't be told
+# could not be saved, so the switch stops rather than drop it.
 function Save-Current($Config) {
   $id = [string] $Config.lastKnownAccountUuid
   $hasTokens = $Config.PSObject.Properties['oauth:tokenCache'] -or $Config.PSObject.Properties['oauth:tokenCacheV2']
-  if (-not $hasTokens -or -not (Test-AccountId $id)) {
+  if (-not $hasTokens) {
     Write-Log 'no desktop sign-in to save'
     return $null
+  }
+  if (-not (Test-AccountId $id)) {
+    throw 'the app is signed in, but its config.json names no account for that sign-in, so it could not be saved and nothing was changed'
   }
   $dir = Join-Path $StoreDir "desktop\$id"
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -180,6 +195,11 @@ function Save-Current($Config) {
 # the CLI's projects folder, which no account owns, so copying the record is
 # all it takes for a chat to show up under another account. Copies only: the
 # newest copy of a record wins, and one it replaces is backed up first.
+#
+# A record carries what its chat saw in its organization (its MCP servers, its
+# prompt), which is why this runs only when asked. chats-copied.json lists what
+# was copied into each folder, so a chat deleted there is not copied back.
+# Answers how many chats came across, each counted once.
 function Sync-Chats([string] $Id) {
   $root = Join-Path $DataDir 'claude-code-sessions'
   $account = Join-Path $root $Id
@@ -195,28 +215,40 @@ function Sync-Chats([string] $Id) {
       if ($null -eq $known -or $record.LastWriteTimeUtc -gt $known.LastWriteTimeUtc) { $newest[$record.Name] = $record }
     }
   }
+  $manifestPath = Join-Path $StoreDir 'chats-copied.json'
+  $manifest = @{}
+  if (Test-Path -LiteralPath $manifestPath) {
+    foreach ($entry in (Read-JsonFile $manifestPath).PSObject.Properties) { $manifest[$entry.Name] = @($entry.Value) }
+  }
   $backups = Join-Path $StoreDir 'chat-backups'
-  $backup = Join-Path $backups (Get-Date -Format 'yyyyMMdd-HHmmss')
-  $copied = 0
+  $backup = Join-Path $backups (Get-Stamp)
+  $came = @{}
   foreach ($target in $targets) {
+    $key = "$Id\$($target.Name)"
+    $copiedHere = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($name in @($manifest[$key])) { if ($name) { [void] $copiedHere.Add([string] $name) } }
     foreach ($record in $newest.Values) {
       $path = Join-Path $target.FullName $record.Name
       $exists = Test-Path -LiteralPath $path
+      if (-not $exists -and $copiedHere.Contains($record.Name)) { continue }
       if ($exists -and (Get-Item -LiteralPath $path).LastWriteTimeUtc -ge $record.LastWriteTimeUtc) { continue }
       if ($exists) {
         New-Item -ItemType Directory -Force -Path $backup | Out-Null
-        Copy-Item -LiteralPath $path -Destination (Join-Path $backup $record.Name) -Force
+        Copy-Item -LiteralPath $path -Destination (Join-Path $backup "$($target.Name)-$($record.Name)") -Force
       }
       Copy-Item -LiteralPath $record.FullName -Destination $path -Force
-      $copied++
+      [void] $copiedHere.Add($record.Name)
+      $came[$record.Name] = $true
     }
+    $manifest[$key] = @($copiedHere)
   }
+  Write-JsonFile $manifestPath $manifest
   if (Test-Path -LiteralPath $backups) {
     Get-ChildItem -LiteralPath $backups -Directory | Sort-Object Name -Descending |
       Select-Object -Skip 5 | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
   }
-  Write-Log "chats: copied $copied into $Id"
-  $copied
+  Write-Log "chats: $($came.Count) came across into $Id ($($targets.Count) organization folders)"
+  $came.Count
 }
 
 function Write-Result([bool] $Ok, $From, $Problem) {
@@ -234,6 +266,13 @@ function Write-Result([bool] $Ok, $From, $Problem) {
 $exe = $null
 $from = $null
 $ChatsCopied = 0
+$lock = $null
+try {
+  $lock = [IO.File]::Open((Join-Path $StoreDir 'swap.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+} catch {
+  Write-Log "another switch is under way; this one (mode=$Mode to=$To) did nothing"
+  exit 3
+}
 try {
   Write-Log "start: mode=$Mode to=$To"
   if ($Mode -eq 'switch') {
@@ -246,7 +285,9 @@ try {
 
   # Let the mod's message reach the screen before the app goes away.
   Start-Sleep -Milliseconds $DelayMs
-  $exe = Stop-App
+  # Known before closing, so the app starts again whatever fails after this.
+  $exe = Get-AppExe
+  Stop-App
   Wait-Unlocked (Join-Path $NetworkDir 'Cookies') 15
   Wait-Unlocked $ConfigPath 15
 
@@ -264,8 +305,14 @@ try {
         Remove-Item -LiteralPath (Join-Path $NetworkDir $name) -Force -ErrorAction SilentlyContinue
       }
     }
-    # The app must still be able to read what was written.
-    [void] (Read-JsonFile $ConfigPath)
+    # The app must still be able to read what was written, and find the
+    # account it was switched to (or none, for "new").
+    $written = Read-JsonFile $ConfigPath
+    $writtenId = [string] $written.lastKnownAccountUuid
+    if ($Mode -eq 'switch' -and $writtenId -ne $To) { throw "config.json names $writtenId after the switch, not $To" }
+    if ($Mode -eq 'new' -and @($AuthKeys | Where-Object { $written.PSObject.Properties[$_] }).Count -gt 0) {
+      throw 'config.json still holds a sign-in after signing out'
+    }
   } catch {
     Write-Log "rolling back: $_"
     Restore-Backup $backup
@@ -277,11 +324,15 @@ try {
   }
   Write-Log "done: from=$from to=$To"
   Write-Result $true $from $null
+  $exitCode = 0
 } catch {
   Write-Log "failed: $_"
   Write-Result $false $from "$_"
+  $exitCode = 1
 } finally {
   if ($exe -and -not $NoRelaunch) {
     try { Start-App $exe } catch { Write-Log "could not start the app again: $_" }
   }
+  if ($lock) { $lock.Dispose() }
 }
+exit $exitCode

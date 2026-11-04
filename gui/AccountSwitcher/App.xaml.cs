@@ -15,6 +15,14 @@ public partial class App : Application
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    private const int Restore = 9;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -22,8 +30,24 @@ public partial class App : Application
         {
             MessageBox.Show(args.Exception.Message, Title, MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
+            // With no window to go back to, a process left running would only
+            // hold the lock that makes every later start look for it.
+            if (MainWindow is null) Shutdown(1);
         };
 
+        try
+        {
+            Start(e);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, Title, MessageBoxButton.OK, MessageBoxImage.Error);
+            Shutdown(1);
+        }
+    }
+
+    private void Start(StartupEventArgs e)
+    {
         var args = e.Args.Select(a => a.ToLowerInvariant()).ToHashSet();
         var quiet = args.Contains("--yes");
 
@@ -86,7 +110,9 @@ public partial class App : Application
         {
             using (other)
             {
-                if (other.Id != me.Id && other.MainWindowHandle != IntPtr.Zero) SetForegroundWindow(other.MainWindowHandle);
+                if (other.Id == me.Id || other.MainWindowHandle == IntPtr.Zero) continue;
+                if (IsIconic(other.MainWindowHandle)) ShowWindow(other.MainWindowHandle, Restore);
+                SetForegroundWindow(other.MainWindowHandle);
             }
         }
     }

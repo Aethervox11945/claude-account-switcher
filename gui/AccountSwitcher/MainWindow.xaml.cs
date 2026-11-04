@@ -14,10 +14,10 @@ public sealed class RowView(AccountRow row, bool movesApp, bool movesCli)
     public AccountRow Row { get; } = row;
     public bool MovesApp { get; } = movesApp;
     public bool MovesCli { get; } = movesCli;
-    public string Name => Row.Name;
+    public string Name => Row.Title;
 
     // What a screen reader announces for the card.
-    public override string ToString() => Row.Name;
+    public override string ToString() => Row.Title;
 
     public string Initial => char.ToUpperInvariant(Row.Name.TrimStart().FirstOrDefault('?')).ToString();
 
@@ -75,10 +75,12 @@ public partial class MainWindow : Window
         _isRefreshing = true;
         try
         {
-            Show(await _store.LoadView());
+            // Off the window's thread: .claude.json can be several megabytes.
+            Show(await Task.Run(_store.LoadView));
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e)
         {
+            // Said in the window, not a dialog: closing one would look again and fail again.
             Say($"Could not read your accounts: {e.Message}");
         }
         finally
@@ -90,12 +92,13 @@ public partial class MainWindow : Window
     private void Show(SwitcherView view)
     {
         AppNow.Text = !view.CanSwitchDesktop ? "Not found" : view.DesktopName ?? "Signed out";
-        CliNow.Text = view.CliName ?? "Not signed in";
+        CliNow.Text = view.CliName ?? (view.IsCliSignedIn ? "Signed in (account not recognized yet)" : "Not signed in");
         AppNow.ToolTip = AppNow.Text;
         CliNow.ToolTip = CliNow.Text;
 
         // Rebuilt only on a change, so a timer tick can't disturb a click.
-        if (_view is not null && _view.Rows.SequenceEqual(view.Rows) && _view.CanSwitchDesktop == view.CanSwitchDesktop)
+        if (_view is not null && _view.Rows.SequenceEqual(view.Rows) && _view.CanSwitchDesktop == view.CanSwitchDesktop
+            && _view.IsCliSignedIn == view.IsCliSignedIn)
         {
             _view = view;
             return;
@@ -130,6 +133,8 @@ public partial class MainWindow : Window
         _isBusy = true;
         SetEnabled(false);
         Say(doing);
+        // A look already under way finishes first, so the two don't write the same files.
+        while (_isRefreshing) await Task.Delay(50);
         string? said;
         try
         {
@@ -161,32 +166,41 @@ public partial class MainWindow : Window
     private async Task Switch(AccountRow row, bool moveApp, bool moveCli)
     {
         if (moveApp && !Ask(
-                $"Claude will close and reopen signed in as {row.Name}.\n\nOpen sessions end, but they're kept and you can reopen them.",
+                $"Claude will close and reopen signed in as {row.Title}.\n\nOpen sessions end, but they're kept and you can reopen them.",
                 "Switch the Claude app"))
             return;
 
-        await Work($"Switching to {row.Name}…", async () =>
+        await Work($"Switching to {row.Title}…", async () =>
         {
             // The CLI first: it switches in place, while the app takes a moment.
+            string? note = null;
             if (moveCli)
             {
-                var problem = await _store.SwitchCli(row.Uuid);
-                if (problem is not null) return problem;
+                var cli = await _store.SwitchCli(row.Id);
+                if (!cli.Ok) return moveApp ? $"{cli.Problem} The app was left as it is." : cli.Problem;
+                note = cli.Problem;
             }
             var chats = 0;
             if (moveApp)
             {
-                var swap = await _store.SwapDesktop("switch", row.Uuid);
-                if (!swap.Ok) return $"The app was not switched: {swap.Error}";
+                var swap = await _store.SwapDesktop("switch", row.Id);
+                if (!swap.Ok)
+                {
+                    return moveCli
+                        ? $"The CLI is now signed in as {row.Title}, but the app was not switched: {swap.Error}"
+                        : $"The app was not switched: {swap.Error}";
+                }
                 chats = swap.ChatsCopied;
             }
 
-            return chats switch
+            var said = chats switch
             {
-                0 => $"Now using {row.Name}.",
-                1 => $"Now using {row.Name}. 1 chat came across.",
-                _ => $"Now using {row.Name}. {chats} chats came across.",
+                0 => $"Now using {row.Title}.",
+                1 => $"Now using {row.Title}. 1 chat came across.",
+                _ => $"Now using {row.Title}. {chats} chats came across.",
             };
+
+            return note is null ? said : $"{said} {note}";
         });
     }
 
@@ -213,24 +227,26 @@ public partial class MainWindow : Window
         Open(menu, button);
     }
 
-    private void Rename(AccountRow row)
+    private async void Rename(AccountRow row)
     {
         var dialog = new RenameWindow(row.Name) { Owner = this };
         if (dialog.ShowDialog() != true) return;
         // An empty name goes back to the email.
-        _store.SetLabel(row.Uuid, dialog.Value);
-        _ = Reload();
+        await Work("Renaming…", async () =>
+        {
+            await _store.SetLabel(row.Id, dialog.Value);
+
+            return null;
+        });
     }
 
-    private void Remove(AccountRow row)
+    private async void Remove(AccountRow row)
     {
         if (!Ask(
-                $"Remove {row.Name} from this computer?\n\nIts saved login is deleted here. You'd have to sign in again to use it.",
+                $"Remove {row.Title} from this computer?\n\nIts saved login is deleted here. You'd have to sign in again to use it. Copies in the backups folder stay until newer switches replace them.",
                 "Remove account"))
             return;
-        _store.Forget(row.Uuid);
-        Say($"Removed {row.Name}.");
-        _ = Reload();
+        await Work($"Removing {row.Title}…", async () => await _store.Forget(row.Id) ?? $"Removed {row.Title}.");
     }
 
     // ---- Adding -----------------------------------------------------------
@@ -290,9 +306,19 @@ public partial class MainWindow : Window
             Header = "Bring Code chats along when switching",
             IsCheckable = true,
             IsChecked = _store.SyncChats,
-            ToolTip = "Copies Claude app Code chats into the account you switch to, so every account lists them.",
+            ToolTip = "Copies Claude app Code chats into every organization of the account you switch to, so each account lists them. A chat carries what it saw in its organization.",
         };
-        sync.Click += (_, _) => _store.SyncChats = sync.IsChecked;
+        sync.Click += (_, _) =>
+        {
+            if (sync.IsChecked && !Ask(
+                    "Each switch will copy the Code chats of your other accounts into every organization of the account you switch to, so a work organization's chats can show up under a personal account, and the other way round.\n\nA copied chat carries what it saw where it ran, such as its MCP servers and its folder, and resuming it sends its transcript to the account you're on.\n\nTurn this on?",
+                    "Bring Code chats along"))
+            {
+                sync.IsChecked = false;
+                return;
+            }
+            _store.SyncChats = sync.IsChecked;
+        };
         menu.Items.Add(sync);
         menu.Items.Add(new Separator());
         Add(menu, "Open saved logins folder", OpenStore);
